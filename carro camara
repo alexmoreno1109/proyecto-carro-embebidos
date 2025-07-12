@@ -1,0 +1,116 @@
+import socket
+import network
+import machine
+import sys
+import gc
+import time
+import _thread
+import ujson
+from machine import Pin, I2C, PWM, UART
+from ov7670_wrapper import *
+
+# ========= Wi-Fi =========
+SSID = "TP-Link_2031"
+PASSWORD = "36825967"
+
+def conectar_wifi(ssid, password):
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    wlan.connect(ssid, password)
+    for i in range(15):
+        if wlan.isconnected():
+            print("✅ Wi-Fi:", wlan.ifconfig()[0])
+            return True
+        time.sleep(1)
+    print("❌ No conectado")
+    return False
+
+if not conectar_wifi(SSID, PASSWORD):
+    sys.exit()
+
+# ========= UART hacia Pico-Carro =========
+uart = UART(0, baudrate=115200, tx=Pin(12), rx=Pin(13))
+
+def enviar_comando_uart(cmd):
+    print("📤 UART →", cmd)
+    uart.write((cmd + '\n').encode())
+
+# ========= Pines OV7670 =========
+mclk_pin_no = 9
+pclk_pin_no = 8
+data_pin_base = 0
+vsync_pin_no = 11
+href_pin_no = 10
+reset_pin_no = 19
+shutdown_pin_no = 18
+sda_pin_no = 20
+scl_pin_no = 21
+
+# ========= Inicialización OV7670 =========
+pwm = PWM(Pin(mclk_pin_no))
+pwm.freq(30_000_000)
+pwm.duty_u16(32768)
+
+i2c = I2C(0, freq=400000, scl=Pin(scl_pin_no), sda=Pin(sda_pin_no))
+
+cam = OV7670Wrapper(i2c, mclk_pin_no, pclk_pin_no, data_pin_base,
+                    vsync_pin_no, href_pin_no, reset_pin_no, shutdown_pin_no)
+
+cam.wrapper_configure_rgb()
+cam.wrapper_configure_base()
+width, height = cam.wrapper_configure_size(OV7670_WRAPPER_SIZE_DIV4)
+i2c.writeto_mem(0x21, 0x13, b'\xE7')
+cam.wrapper_configure_test_pattern(OV7670_WRAPPER_TEST_PATTERN_NONE)
+frame_buf = bytearray(width * height * 2)
+gc.collect()
+
+# ========= TCP =========
+SERVER_IP = "192.168.0.102"
+PORT = 9000
+
+# ========= Receptor de comandos =========
+def receptor_comandos(sock):
+    buffer = b""
+    while True:
+        try:
+            datos = sock.recv(1024)
+            if not datos:
+                break
+            buffer += datos
+
+            while b'\n' in buffer:
+                linea, buffer = buffer.split(b'\n', 1)
+                try:
+                    comando = linea.decode().strip()
+
+                    # 🚀 Reenviar TODO el comando tal cual por UART
+                    enviar_comando_uart(comando)
+
+                except Exception as e:
+                    print("❌ Error al procesar comando:", e)
+
+        except Exception as e:
+            print("❌ Error en recepción de comandos:", e)
+            break
+
+# ========= Loop principal =========
+while True:
+    try:
+        print("🌐 Conectando al servidor...")
+        sock = socket.socket()
+        sock.connect((SERVER_IP, PORT))
+        print("✅ Conectado al servidor.")
+
+        _thread.start_new_thread(receptor_comandos, (sock,))
+
+        while True:
+            cam.capture(frame_buf)
+            size_bytes = len(frame_buf).to_bytes(4, 'big')
+            header = width.to_bytes(2, 'big') + height.to_bytes(2, 'big')
+            sock.sendall(size_bytes + header + frame_buf)
+            gc.collect()
+
+    except Exception as e:
+        print("⚠️ Reintentando conexión...", e)
+        time.sleep(2)
+
