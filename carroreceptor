@@ -1,0 +1,111 @@
+from machine import UART, Pin, PWM
+import ujson
+import time
+
+# UART1 RX en GP5 ← Pico-CAM TX (GP4)
+uart = UART(1, baudrate=115200, tx=Pin(4), rx=Pin(5))
+uart.init(bits=8, parity=None, stop=1)
+
+# === MOTORES – Pines del puente H ===
+PIN_ENA = PWM(Pin(10))  # Habilita motor A
+PIN_IN1 = Pin(11, Pin.OUT)
+PIN_IN2 = Pin(12, Pin.OUT)
+PIN_ENB = PWM(Pin(13))  # Habilita motor B
+PIN_IN3 = Pin(14, Pin.OUT)
+PIN_IN4 = Pin(15, Pin.OUT)
+
+PIN_ENA.freq(1000)
+PIN_ENA.duty_u16(65535)
+PIN_ENB.freq(1000)
+PIN_ENB.duty_u16(65535)
+
+# === SERVOS – PWM en GP16, GP17, GP18 ===
+servo_base = PWM(Pin(18))
+servo_hombro = PWM(Pin(17))
+servo_codo = PWM(Pin(16))
+for s in [servo_base, servo_hombro, servo_codo]:
+    s.freq(50)
+
+# === Funciones auxiliares ===
+def detener_motores():
+    PIN_IN1.value(0)
+    PIN_IN2.value(0)
+    PIN_IN3.value(0)
+    PIN_IN4.value(0)
+
+def detener_servos():
+    servo_base.duty_u16(0)
+    servo_hombro.duty_u16(0)
+    servo_codo.duty_u16(0)
+
+def detener_todo():
+    detener_motores()
+    detener_servos()
+
+def mover_brazo(base, hombro, codo):
+    # Sin sobrescribir el codo: respetar valores enviados
+    duty_base = int(-11111 * base + 1500000)
+    duty_hombro = int(-10000 * hombro + 1500000)
+    duty_codo = int(11250 * codo + 887500)
+
+    print(f"🦾 BASE:{base} → {duty_base} | HOMBRO:{hombro} → {duty_hombro} | CODO:{codo} → {duty_codo}")
+
+    servo_base.duty_ns(duty_base)
+    servo_hombro.duty_ns(duty_hombro)
+    servo_codo.duty_ns(duty_codo)
+
+# === Interpretar comandos UART ===
+def ejecutar_comando(cmd):
+    print("📨 Comando recibido:", cmd)
+
+    # Intentar decodificar como JSON (brazo)
+    try:
+        data = ujson.loads(cmd)
+        if all(k in data for k in ("base", "hombro", "codo")):
+            mover_brazo(data["base"], data["hombro"], data["codo"])
+            return
+    except Exception as e:
+        print("⚠️ No es JSON:", e)
+
+    # Comandos de texto para motores
+    detener_motores()
+    if cmd == "FWD":
+        PIN_IN1.value(1)
+        PIN_IN2.value(0)
+        PIN_IN3.value(1)
+        PIN_IN4.value(0)
+    elif cmd == "BACK":
+        PIN_IN1.value(0)
+        PIN_IN2.value(1)
+        PIN_IN3.value(0)
+        PIN_IN4.value(1)
+    elif cmd == "LEFT":
+        PIN_IN1.value(1)
+        PIN_IN2.value(0)
+        PIN_IN3.value(0)
+        PIN_IN4.value(1)
+    elif cmd == "RIGHT":
+        PIN_IN1.value(0)
+        PIN_IN2.value(1)
+        PIN_IN3.value(1)
+        PIN_IN4.value(0)
+    elif cmd == "STOP":
+        detener_todo()
+
+# === Loop principal UART ===
+print("🚦 Pico-Carro listo. Escuchando UART...")
+buffer = b""
+
+while True:
+    if uart.any():
+        char = uart.read(1)
+        if char == b'\n':
+            try:
+                comando = buffer.decode().strip()
+                ejecutar_comando(comando)
+            except Exception as e:
+                print("❌ Error procesando comando:", e)
+            buffer = b""
+        else:
+            buffer += char
+
